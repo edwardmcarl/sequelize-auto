@@ -361,12 +361,12 @@ export class AutoGenerator {
           } else if (field_type === 'uuid' && (defaultVal === 'gen_random_uuid()' || defaultVal === 'uuid_generate_v4()')) {
             val_text = "DataTypes.UUIDV4";
 
-          } else if (defaultVal.match(/\w+\(\)$/)) {
+          } else if (defaultVal.match(/\w+\(\w*\)$/)) {
             // replace db function with sequelize function
             val_text = "Sequelize.Sequelize.fn('" + defaultVal.replace(/\(\)$/g, "") + "')";
 
           } else if (this.isNumber(field_type)) {
-            if (defaultVal.match(/\(\)/g)) {
+            if (defaultVal.match(/\(\w*\)/g)) {
               // assume it's a server function if it contains parens
               val_text = "Sequelize.Sequelize.literal('" + defaultVal + "')";
             } else {
