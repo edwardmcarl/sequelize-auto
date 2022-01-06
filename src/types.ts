@@ -1,4 +1,5 @@
 import _ from "lodash";
+import { check as isReserved } from "reserved-words";
 import { Utils } from "sequelize";
 import { ColumnDescription, Dialect } from "sequelize/types";
 import { FKSpec } from "./dialects/dialect-options";
@@ -107,7 +108,7 @@ export function qNameJoin(schema: string | undefined, table: string | undefined)
 }
 
 /** Language of output model files */
-export declare type LangOption = "es5" | "es6" | "esm" | "ts" | "esmd";
+export declare type LangOption = "es5" | "es6" | "esm" | "ts";
 
 /** "c" camelCase |
  * "l" lower_case |
@@ -116,10 +117,20 @@ export declare type LangOption = "es5" | "es6" | "esm" | "ts" | "esmd";
  * "u" UPPER_CASE */
 export declare type CaseOption = "c" | "l" | "o" | "p" | "u";
 
+/**
+ * "c" camelCase |
+ * "k" kebab-case |
+ * "l" lower_case |
+ * "o" original (db) |
+ * "p" PascalCase |
+ * "u" UPPER_CASE
+ */
+export declare type CaseFileOption = "k" | CaseOption;
+
 export interface AutoOptions {
   additional?: any;
   /** Case of file names */
-  caseFile?: CaseOption;
+  caseFile?: CaseFileOption;
   /** Case of model names */
   caseModel?: CaseOption;
   /** Case of property names */
@@ -142,6 +153,8 @@ export interface AutoOptions {
   lang?: LangOption;
   /** Whether to avoid creating alias property in relations */
   noAlias?: boolean;
+  /** Whether to skip writing index information */
+  noIndexes?: boolean;
   /** Whether to skip writing the init-models file */
   noInitModels?: boolean;
   /** Whether to skip writing the files */
@@ -156,6 +169,8 @@ export interface AutoOptions {
   singularize: boolean;
   /** Tables to skip exporting */
   skipTables?: string[];
+  /** Fields to skip exporting */
+  skipFields?: string[];
   /** Whether to indent with spaces instead of tabs (default true) */
   spaces?: boolean;
   /** File where database is stored (sqlite only) */
@@ -166,6 +181,10 @@ export interface AutoOptions {
   username?: string;
   /** Whether to export views (default false) */
   views?: boolean;
+  /** Primary Key Suffixes to trim (default "id") */
+  pkSuffixes?: string[];
+  /** Use `sequelize.define` instead of `init` for model initialization.  See issues #527, #559, #573 */
+  useDefine: boolean;
 }
 
 export type TSField = { special: string[]; elementType: string; } & ColumnDescription;
@@ -186,7 +205,7 @@ export function singularize(s: string) {
 }
 
 /** Change casing of val string according to opt [c|l|o|p|u]  */
-export function recase(opt: CaseOption | undefined, val: string | null, singular = false) {
+export function recase(opt: CaseOption | CaseFileOption | undefined, val: string | null, singular = false) {
   if (singular && val) {
     val = singularize(val);
   }
@@ -195,6 +214,9 @@ export function recase(opt: CaseOption | undefined, val: string | null, singular
   }
   if (opt === 'c') {
     return _.camelCase(val);
+  }
+  if (opt === 'k') {
+    return _.kebabCase(val);
   }
   if (opt === 'l') {
     return _.snakeCase(val);
@@ -208,3 +230,24 @@ export function recase(opt: CaseOption | undefined, val: string | null, singular
   return val;
 }
 
+const tsNames = ["DataTypes", "Model", "Optional", "Sequelize"];
+export function makeTableName(opt: CaseOption | undefined, tableNameOrig: string | null, singular = false, lang = "es5") {
+  let name = recase(opt, tableNameOrig, singular);
+  if (isReserved(name) || (lang == "ts" && tsNames.includes(name))) {
+    name += "_";
+  }
+  return name;
+}
+
+/** build the array of indentation strings */
+export function makeIndent(spaces: boolean | undefined, indent: number | undefined): string[] {
+  let sp = '';
+  for (let x = 0; x < (indent || 2); ++x) {
+    sp += (spaces === true ? ' ' : "\t");
+  }
+  let space = [];
+  for (let i = 0; i < 6; i++) {
+    space[i] = sp.repeat(i);
+  }
+  return space;
+}

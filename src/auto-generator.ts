@@ -1,7 +1,7 @@
 import _ from "lodash";
 import { ColumnDescription } from "sequelize/types";
 import { DialectOptions, FKSpec } from "./dialects/dialect-options";
-import { AutoOptions, CaseOption, Field, IndexSpec, LangOption, qNameJoin, qNameSplit, recase, Relation, TableData, TSField, singularize, pluralize } from "./types";
+import { AutoOptions, CaseFileOption, CaseOption, Field, IndexSpec, LangOption, makeIndent, makeTableName, pluralize, qNameJoin, qNameSplit, recase, Relation, singularize, TableData, TSField } from "./types";
 
 /** Generates text from each table in TableData */
 export class AutoGenerator {
@@ -18,10 +18,13 @@ export class AutoGenerator {
     lang?: LangOption;
     caseModel?: CaseOption;
     caseProp?: CaseOption;
-    caseFile?: CaseOption;
+    caseFile?: CaseFileOption;
+    skipFields?: string[];
     additional?: any;
     schema?: string;
     singularize: boolean;
+    useDefine: boolean;
+    noIndexes?: boolean;
   };
 
   constructor(tableData: TableData, dialect: DialectOptions, options: AutoOptions) {
@@ -33,16 +36,7 @@ export class AutoGenerator {
     this.dialect = dialect;
     this.options = options;
     this.options.lang = this.options.lang || 'es5';
-
-    // build the space array of indentation strings
-    let sp = '';
-    for (let x = 0; x < (this.options.indentation || 2); ++x) {
-      sp += (this.options.spaces === true ? ' ' : "\t");
-    }
-    this.space = [];
-    for (let i = 0; i < 6; i++) {
-      this.space[i] = sp.repeat(i);
-    }
+    this.space = makeIndent(this.options.spaces, this.options.indentation);
   }
 
   makeHeaderTemplate() {
@@ -59,19 +53,21 @@ export class AutoGenerator {
       header += "}\n\n";
       header += "class #TABLE# extends Sequelize.Model {\n";
       header += sp + "static init(sequelize, DataTypes) {\n";
-      header += sp + "super.init({\n";
+      if (this.options.useDefine) {
+        header += sp + "return sequelize.define('#TABLE#', {\n";
+      } else {
+        header += sp + "return super.init({\n";
+      }
     } else if (this.options.lang === 'esm') {
       header += "import _sequelize from 'sequelize';\n";
       header += "const { Model, Sequelize } = _sequelize;\n\n";
       header += "export default class #TABLE# extends Model {\n";
       header += sp + "static init(sequelize, DataTypes) {\n";
-      header += sp + "super.init({\n";
-    } else if (this.options.lang === 'esmd') {
-      // new: use define (as with es5), but with es6 modules:
-      header += "import _sequelize from 'sequelize';\n";
-      header += "const { Model, Sequelize } = _sequelize;\n\n"; // are those first two lines even needed?
-      header += "export default function(sequelize, DataTypes) {\n";
-      header += sp + "return sequelize.define('#TABLE#', {\n";
+      if (this.options.useDefine) {
+        header += sp + "return sequelize.define('#TABLE#', {\n";
+      } else {
+        header += sp + "return super.init({\n";
+      }
     } else {
       header += "const Sequelize = require('sequelize');\n";
       header += "module.exports = function(sequelize, DataTypes) {\n";
@@ -89,7 +85,7 @@ export class AutoGenerator {
     tableNames.forEach(table => {
       let str = header;
       const [schemaName, tableNameOrig] = qNameSplit(table);
-      const tableName = recase(this.options.caseModel, tableNameOrig, this.options.singularize);
+      const tableName = makeTableName(this.options.caseModel, tableNameOrig, this.options.singularize, this.options.lang);
 
       if (this.options.lang === 'ts') {
         const associations = this.addTypeScriptAssociationMixins(table);
@@ -125,11 +121,35 @@ export class AutoGenerator {
         str += "export class #TABLE# extends Model<#TABLE#Attributes, #TABLE#CreationAttributes> implements #TABLE#Attributes {\n";
         str += this.addTypeScriptFields(table, false);
         str += "\n" + associations.str;
-        str += "\n" + this.space[1] + "static initModel(sequelize: Sequelize.Sequelize): typeof " + tableName + " {\n";
-        str += this.space[2] + tableName + ".init({\n";
+        str += "\n" + this.space[1] + "static initModel(sequelize: Sequelize.Sequelize): typeof #TABLE# {\n";
+
+        if (this.options.useDefine) {
+          str += this.space[2] + "return sequelize.define('#TABLE#', {\n";
+
+        } else {
+          str += this.space[2] + "return #TABLE#.init({\n";
+        }
       }
 
       str += this.addTable(table);
+
+      const lang = this.options.lang;
+      if (lang === 'ts' && this.options.useDefine) {
+        str += ") as typeof #TABLE#;\n";
+      } else {
+        str += ");\n";
+      }
+
+      if (lang === 'es6' || lang === 'esm' || lang === 'ts') {
+        if (this.options.useDefine) {
+          str += this.space[1] + "}\n}\n";
+        } else {
+          // str += this.space[1] + "return #TABLE#;\n";
+          str += this.space[1] + "}\n}\n";
+        }
+      } else {
+        str += "};\n";
+      }
 
       const re = new RegExp('#TABLE#', 'g');
       str = str.replace(re, tableName);
@@ -144,10 +164,9 @@ export class AutoGenerator {
   private addTable(table: string) {
 
     const [schemaName, tableNameOrig] = qNameSplit(table);
-    const tableName = recase(this.options.caseModel, tableNameOrig, this.options.singularize);
     const space = this.space;
     let timestamps = (this.options.additional && this.options.additional.timestamps === true) || false;
-    let paranoid = (this.options.additional && this.options.additional.paranoid === true) || false;;
+    let paranoid = (this.options.additional && this.options.additional.paranoid === true) || false;
 
     // add all the fields
     let str = '';
@@ -164,7 +183,9 @@ export class AutoGenerator {
 
     // add the table options
     str += space[1] + "}, {\n";
-    str += space[2] + "sequelize,\n";
+    if (!this.options.useDefine) {
+      str += space[2] + "sequelize,\n";
+    }
     str += space[2] + "tableName: '" + tableNameOrig + "',\n";
 
     if (schemaName && this.dialect.hasSchema) {
@@ -200,20 +221,14 @@ export class AutoGenerator {
     }
 
     // add indexes
-    str += this.addIndexes(table);
+    if (!this.options.noIndexes) {
+      str += this.addIndexes(table);
+    }
 
     str = space[2] + str.trim();
     str = str.substring(0, str.length - 1);
     str += "\n" + space[1] + "}";
 
-    str += ");\n";
-    const lang = this.options.lang;
-    if (lang === 'es6' || lang === 'esm' || lang === 'ts') {
-      str += space[1] + "return " + tableName + ";\n";
-      str += space[1] + "}\n}\n";
-    } else {
-      str += "};\n";
-    }
     return str;
   }
 
@@ -223,6 +238,10 @@ export class AutoGenerator {
     // ignore Sequelize standard fields
     const additional = this.options.additional;
     if (additional && (additional.timestamps !== false) && (this.isTimestampField(field) || this.isParanoidField(field))) {
+      return '';
+    }
+
+    if (this.isIgnoredField(field)) {
       return '';
     }
 
@@ -317,6 +336,11 @@ export class AutoGenerator {
           const field_type = fieldObj.type.toLowerCase();
           defaultVal = this.escapeSpecial(defaultVal);
 
+          while (defaultVal.startsWith('(') && defaultVal.endsWith(')')) {
+            // remove extra parens around mssql defaults
+            defaultVal = defaultVal.replace(/^[(]/, '').replace(/[)]$/, '');
+          }
+
           if (field_type === 'bit(1)' || field_type === 'bit' || field_type === 'boolean') {
             // convert string to boolean
             val_text = /1|true/i.test(defaultVal) ? "true" : "false";
@@ -330,21 +354,29 @@ export class AutoGenerator {
             }
             val_text = `[${val_text}]`;
 
-          } else if (this.isNumber(field_type) || field_type.match(/^(json)/)) {
-              // preserve as literal if this field is a function to extract a value from a timestamp
-              if (defaultVal.toLowerCase().includes('extract')) {
-                val_text = "Sequelize.Sequelize.literal('" + defaultVal + "')";
-              } else {
-                  // remove () around mssql numeric values; don't quote numbers or json
-                  val_text = defaultVal.replace(/[)(]/g, '');    
-              }
+          } else if (field_type.match(/^(json)/)) {
+            // don't quote json
+            val_text = defaultVal;
 
           } else if (field_type === 'uuid' && (defaultVal === 'gen_random_uuid()' || defaultVal === 'uuid_generate_v4()')) {
             val_text = "DataTypes.UUIDV4";
 
-          } else if (_.endsWith(defaultVal, '()') || _.endsWith(defaultVal, '())')) {
-            // wrap default value function
-            val_text = "Sequelize.Sequelize.fn('" + defaultVal.replace(/[)(]/g, "") + "')";
+          } else if (defaultVal.match(/\w+\(\)$/)) {
+            // replace db function with sequelize function
+            val_text = "Sequelize.Sequelize.fn('" + defaultVal.replace(/\(\)$/g, "") + "')";
+
+          } else if (this.isNumber(field_type)) {
+            if (defaultVal.match(/\(\)/g)) {
+              // assume it's a server function if it contains parens
+              val_text = "Sequelize.Sequelize.literal('" + defaultVal + "')";
+            } else {
+              // don't quote numbers
+              val_text = defaultVal;
+            }
+
+          } else if (defaultVal.match(/\(\)/g)) {
+            // embedded function, pass as literal
+            val_text = "Sequelize.Sequelize.literal('" + defaultVal + "')";
 
           } else if (field_type.indexOf('date') === 0 || field_type.indexOf('timestamp') === 0) {
             if (_.includes(['current_timestamp', 'current_date', 'current_time', 'localtime', 'localtimestamp'], defaultVal.toLowerCase())) {
@@ -352,6 +384,7 @@ export class AutoGenerator {
             } else {
               val_text = quoteWrapper + defaultVal + quoteWrapper;
             }
+
           } else {
             val_text = quoteWrapper + defaultVal + quoteWrapper;
           }
@@ -365,7 +398,7 @@ export class AutoGenerator {
 
         str += space[3] + attr + ": " + val_text;
 
-      } else if (attr === "comment" && !fieldObj[attr]) {
+      } else if (attr === "comment" && (!fieldObj[attr] || this.dialect.name === "mssql")) {
         return true;
       } else {
         let val = (attr !== "type") ? null : this.getSqType(fieldObj, attr);
@@ -385,11 +418,7 @@ export class AutoGenerator {
     }
 
     if (field !== fieldName) {
-      // write the original fieldname, unless it is a key and the column names are case-insensitive
-      // because Sequelize may request the same column twice in a join condition otherwise.
-      if (!fieldObj.primaryKey || this.dialect.canAliasPK || field.toUpperCase() !== fieldName.toUpperCase()) {
-        str += space[3] + "field: '" + field + "',\n";
-      }
+      str += space[3] + "field: '" + field + "',\n";
     }
 
     // removes the last `,` within the attribute options
@@ -490,7 +519,7 @@ export class AutoGenerator {
       val = 'DataTypes.TEXT' + (!_.isNull(length) ? length : '');
     } else if (type === "date") {
       val = 'DataTypes.DATEONLY';
-    } else if (type.match(/^(date|timestamp)/)) {
+    } else if (type.match(/^(date|timestamp|year)/)) {
       val = 'DataTypes.DATE' + (!_.isNull(length) ? length : '');
     } else if (type.match(/^(time)/)) {
       val = 'DataTypes.TIME';
@@ -551,7 +580,8 @@ export class AutoGenerator {
     const fields = _.keys(this.tables[table]);
     return fields.filter((field): boolean => {
       const fieldObj = this.tables[table][field];
-      return fieldObj.allowNull || (!!fieldObj.defaultValue || fieldObj.defaultValue === "") || fieldObj.primaryKey;
+      return fieldObj.allowNull || (!!fieldObj.defaultValue || fieldObj.defaultValue === "") || fieldObj.autoIncrement
+        || this.isTimestampField(field);
     });
   }
 
@@ -599,7 +629,7 @@ export class AutoGenerator {
             str += `${sp}${rel.childProp}!: ${rel.childModel};\n`;
             str += `${sp}get${pchild}!: Sequelize.HasOneGetAssociationMixin<${rel.childModel}>;\n`;
             str += `${sp}set${pchild}!: Sequelize.HasOneSetAssociationMixin<${rel.childModel}, ${rel.childModel}Id>;\n`;
-            str += `${sp}create${pchild}!: Sequelize.HasOneCreateAssociationMixin<${rel.childModel}CreationAttributes>;\n`;
+            str += `${sp}create${pchild}!: Sequelize.HasOneCreateAssociationMixin<${rel.childModel}>;\n`;
             needed[rel.childTable].add(rel.childModel);
             needed[rel.childTable].add(`${rel.childModel}Id`);
             needed[rel.childTable].add(`${rel.childModel}CreationAttributes`);
@@ -665,9 +695,11 @@ export class AutoGenerator {
     const notNull = isInterface ? '' : '!';
     let str = '';
     fields.forEach(field => {
-      const name = this.quoteName(recase(this.options.caseProp, field));
-      const isOptional = this.getTypeScriptFieldOptional(table, field);
-      str += `${sp}${name}${isOptional ? '?' : notNull}: ${this.getTypeScriptType(table, field)};\n`;
+      if (!this.options.skipFields || !this.options.skipFields.includes(field)){
+        const name = this.quoteName(recase(this.options.caseProp, field));
+        const isOptional = this.getTypeScriptFieldOptional(table, field);
+        str += `${sp}${name}${isOptional ? '?' : notNull}: ${this.getTypeScriptType(table, field)};\n`;
+      }
     });
     return str;
   }
@@ -726,8 +758,8 @@ export class AutoGenerator {
     if (additional.timestamps === false) {
       return false;
     }
-    return ((!additional.createdAt && field.toLowerCase() === 'createdat') || additional.createdAt === field)
-      || ((!additional.updatedAt && field.toLowerCase() === 'updatedat') || additional.updatedAt === field);
+    return ((!additional.createdAt && recase('c', field) === 'createdAt') || additional.createdAt === field)
+      || ((!additional.updatedAt && recase('c', field) === 'updatedAt') || additional.updatedAt === field);
   }
 
   private isParanoidField(field: string) {
@@ -735,7 +767,11 @@ export class AutoGenerator {
     if (additional.timestamps === false || additional.paranoid === false) {
       return false;
     }
-    return ((!additional.deletedAt && field.toLowerCase() === 'deletedat') || additional.deletedAt === field);
+    return ((!additional.deletedAt && recase('c', field) === 'deletedAt') || additional.deletedAt === field);
+  }
+
+  private isIgnoredField(field: string) {
+    return (this.options.skipFields && this.options.skipFields.includes(field));
   }
 
   private escapeSpecial(val: string) {
